@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+# hookprobe — run a Claude Code hook with synthetic input, print the decision.
+#
+# A PreToolUse hook reads a JSON envelope on stdin and either prints
+# nothing (allow) or prints a JSON object describing an ask/deny
+# decision. Debugging a hook by hand means hand-rolling the envelope,
+# piping into the script, and squinting at the output. hookprobe does
+# that for you.
+#
+# Usage:
+#   hookprobe <hook> --bash 'rm -rf ./tmp'
+#   hookprobe <hook> --tool Bash --input '{"command":"npm publish"}'
+#   hookprobe <hook> --tool Read --input '{"file_path":"/etc/passwd"}'
+#   hookprobe <hook> --batch cases.tsv
+#
+# Flags:
+#   --bash CMD              shorthand for --tool Bash --input {command:CMD}
+#   --tool NAME             tool_name (default: Bash)
+#   --input JSON            tool_input JSON object (default: {})
+#   --event NAME            hook event name (default: PreToolUse)
+#   --headless              set CLAUDE_HEADLESS=1 for the run
+#   --project-dir PATH      export CLAUDE_PROJECT_DIR (default: cwd)
+#   --json                  print the raw hook output (no pretty-format)
+#   --explain               print envelope + raw output + decision
+#   --batch FILE            read cases from FILE; tab-separated:
+#                              NAME<TAB>EXPECT<TAB>CMD[<TAB>HEADLESS]
+#                           EXPECT in {allow,ask,deny}; HEADLESS 0|1.
+#                           Blank lines and lines starting with # ignored.
+#   -h, --help              show this help
+
+set -uo pipefail
+
+PROG="${0##*/}"
+
+die()  { printf 'hookprobe: %s\n' "$1" >&2; exit 2; }
+help() { sed -n '/^# hookprobe/,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
+
+# ---- arg parsing --------------------------------------------------
+
+HOOK=""
+TOOL="Bash"
+EVENT="PreToolUse"
+INPUT_JSON="{}"
+HEADLESS=0
+RAW=0
+EXPLAIN=0
+BATCH=""
+
+while (( $# > 0 )); do
+  case "$1" in
+    -h|--help)        help ;;
+    --bash)           [[ $# -lt 2 ]] && die "--bash requires arg"
+                      INPUT_JSON="$(jq -cn --arg c "$2" '{command:$c}')" || die "jq failed"
+                      TOOL="Bash"
+                      shift 2 ;;
+    --tool)           [[ $# -lt 2 ]] && die "--tool requires arg"
+                      TOOL="$2"; shift 2 ;;
+    --input)          [[ $# -lt 2 ]] && die "--input requires arg"
+                      INPUT_JSON="$2"; shift 2 ;;
+    --event)          [[ $# -lt 2 ]] && die "--event requires arg"
+                      EVENT="$2"; shift 2 ;;
+    --headless)       HEADLESS=1; shift ;;
+    --project-dir)    [[ $# -lt 2 ]] && die "--project-dir requires arg"
+                      export CLAUDE_PROJECT_DIR="$2"; shift 2 ;;
+    --json)           RAW=1; shift ;;
+    --explain)        EXPLAIN=1; shift ;;
+    --batch)          [[ $# -lt 2 ]] && die "--batch requires arg"
+                      BATCH="$2"; shift 2 ;;
+    --)               shift; break ;;
+    -*)               die "unknown flag: $1" ;;
+    *)                if [[ -z "$HOOK" ]]; then HOOK="$1"; else die "unexpected arg: $1"; fi
+                      shift ;;
+  esac
+done
+
+[[ -z "$HOOK" ]] && die "missing hook path (try --help)"
+[[ -x "$HOOK" ]] || die "hook not executable: $HOOK"
+command -v jq >/dev/null || die "jq is required"
+
+# Default CLAUDE_PROJECT_DIR to cwd if unset, so hooks that read it
+# behave the same way they would under normal Claude Code invocation.
+: "${CLAUDE_PROJECT_DIR:=$PWD}"
+export CLAUDE_PROJECT_DIR
+
+# ---- core: one run ------------------------------------------------
+
+# run_hook <tool> <input_json> <headless 0|1> [event]
+# Prints: <decision>\t<reason>\t<raw>
+# Decision is one of: allow, ask, deny, malformed.
+run_hook() {
+  local tool="$1" input="$2" headless="$3" event="${4:-$EVENT}"
+  local envelope raw decision reason
+
+  if ! envelope="$(jq -cn \
+       --arg e "$event" --arg t "$tool" --argjson i "$input" \
+       '{hook_event_name:$e, tool_name:$t, tool_input:$i}' 2>/dev/null)"; then
+    printf 'malformed\tinput json invalid\t\n'
+    return
+  fi
+
+  if [[ "$headless" == "1" ]]; then
+    raw="$(CLAUDE_HEADLESS=1 "$HOOK" <<<"$envelope" 2>&1)"
+  else
+    raw="$(CLAUDE_HEADLESS= "$HOOK" <<<"$envelope" 2>&1)"
+  fi
+
+  if [[ -z "$raw" ]]; then
+    decision="allow"; reason=""
+  else
+    decision="$(jq -r '.hookSpecificOutput.permissionDecision // "malformed"' <<<"$raw" 2>/dev/null || echo malformed)"
+    reason="$(jq -r '.hookSpecificOutput.permissionDecisionReason // ""' <<<"$raw" 2>/dev/null || echo "")"
+  fi
+  printf '%s\t%s\t%s\n' "$decision" "$reason" "$raw"
+}
+
+# ---- pretty output (single case) ----------------------------------
+
+print_color() {
+  local code="$1"; shift
+  if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    printf '\033[%sm%s\033[0m' "$code" "$*"
+  else
+    printf '%s' "$*"
+  fi
+}
+
+color_for() {
+  case "$1" in
+    allow) echo "32" ;;   # green
+    ask)   echo "33" ;;   # yellow
+    deny)  echo "31" ;;   # red
+    *)     echo "35" ;;   # magenta for malformed
+  esac
+}
+
+pretty_single() {
+  local decision="$1" reason="$2" raw="$3"
+  local code
+  code="$(color_for "$decision")"
+  if [[ $EXPLAIN -eq 1 ]]; then
+    printf 'hook:    %s\n' "$HOOK"
+    printf 'tool:    %s\n' "$TOOL"
+    printf 'event:   %s\n' "$EVENT"
+    printf 'input:   %s\n' "$INPUT_JSON"
+    printf 'headless: %s\n' "$HEADLESS"
+    printf 'raw:     %s\n' "$raw"
+    printf 'decision: '
+    print_color "$code" "$decision"
+    printf '\n'
+    [[ -n "$reason" ]] && printf 'reason:  %s\n' "$reason"
+  elif [[ $RAW -eq 1 ]]; then
+    [[ -n "$raw" ]] && printf '%s\n' "$raw"
+  else
+    print_color "$code" "$decision"
+    [[ -n "$reason" ]] && printf '  %s' "$reason"
+    printf '\n'
+  fi
+}
+
+# ---- batch mode ---------------------------------------------------
+
+# Map decision → expected
+run_batch() {
+  local file="$1"
+  [[ -r "$file" ]] || die "batch file not readable: $file"
+  local pass=0 fail=0 line_no=0
+  local name expect cmd headless decision reason raw input
+  local failures=()
+
+  while IFS=$'\t' read -r name expect cmd headless rest || [[ -n "${name:-}" ]]; do
+    line_no=$((line_no + 1))
+    [[ -z "${name:-}" ]] && continue
+    case "$name" in '#'*) continue ;; esac
+    : "${expect:=}"; : "${cmd:=}"; : "${headless:=0}"
+    if [[ -z "$expect" || -z "$cmd" ]]; then
+      die "batch line $line_no: need NAME<TAB>EXPECT<TAB>CMD (got: $name|$expect|$cmd)"
+    fi
+    input="$(jq -cn --arg c "$cmd" '{command:$c}')"
+    IFS=$'\t' read -r decision reason raw < <(run_hook "Bash" "$input" "$headless")
+    if [[ "$decision" == "$expect" ]]; then
+      pass=$((pass + 1))
+      printf '  ok    %s\t(%s)\n' "$name" "$decision"
+    else
+      fail=$((fail + 1))
+      failures+=("$name: expected $expect, got $decision — $cmd")
+      printf '  FAIL  %s\texpected %s, got %s\n' "$name" "$expect" "$decision"
+      printf '        cmd: %s\n' "$cmd"
+      [[ -n "$reason" ]] && printf '        %s\n' "$reason"
+    fi
+  done < "$file"
+
+  printf '\n%d passed · %d failed\n' "$pass" "$fail"
+  if (( fail > 0 )); then
+    printf '\nfailures:\n'
+    for f in "${failures[@]}"; do printf '  - %s\n' "$f"; done
+    return 1
+  fi
+  return 0
+}
+
+# ---- dispatch -----------------------------------------------------
+
+if [[ -n "$BATCH" ]]; then
+  run_batch "$BATCH"
+  exit $?
+fi
+
+IFS=$'\t' read -r decision reason raw < <(run_hook "$TOOL" "$INPUT_JSON" "$HEADLESS")
+pretty_single "$decision" "$reason" "$raw"
+
+case "$decision" in
+  allow) exit 0 ;;
+  ask)   exit 10 ;;
+  deny)  exit 20 ;;
+  *)     exit 2 ;;
+esac
