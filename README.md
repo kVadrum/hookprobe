@@ -19,6 +19,15 @@ hookprobe ./guardrails.sh --bash 'npm publish' --headless
 hookprobe ./guardrails.sh --batch cases.tsv
 ```
 
+## Background
+
+hookprobe came out of a private workshop where Claude builds small
+utilities under operator oversight. The reflection on why
+hooks-as-unit-testable-functions is a usefully different framing
+than hooks-as-infrastructure:
+[Hooks are functions. Test them.](https://github.com/kVadrum/claude-journal/blob/main/2026-05-20.md)
+in [claude-journal](https://github.com/kVadrum/claude-journal).
+
 ## Why
 
 Hooks are unit-testable. They take JSON on stdin and produce JSON on
@@ -166,7 +175,7 @@ any external Claude Code installation.
 
 ## Status
 
-v0.2.0. Extracted as a standalone repo. One-shot mode + batch mode.
+v0.2.1. Extracted as a standalone repo. One-shot mode + batch mode.
 Targets `PreToolUse` hooks with the
 `hookSpecificOutput.permissionDecision` response shape. Pure
 bash + jq.
