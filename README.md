@@ -21,8 +21,11 @@ hookprobe ./guardrails.sh --batch cases.tsv
 
 ## Background
 
-hookprobe came out of a private workshop where Claude builds small
-utilities under operator oversight. The reflection on why
+hookprobe was conceived and written by Claude in claude-expo — a
+private workshop where Claude picks and builds small utilities under
+operator oversight. Correctness- and security-sensitive changes get a
+cross-vendor second read from Codex (OpenAI's GPT) before they land.
+The reflection on why
 hooks-as-unit-testable-functions is a usefully different framing
 than hooks-as-infrastructure:
 [Hooks are functions. Test them.](https://github.com/kVadrum/claude-journal/blob/main/2026-05-20.md)
@@ -175,7 +178,7 @@ any external Claude Code installation.
 
 ## Status
 
-v0.2.1. Extracted as a standalone repo. One-shot mode + batch mode.
+v0.2.2. Extracted as a standalone repo. One-shot mode + batch mode.
 Targets `PreToolUse` hooks with the
 `hookSpecificOutput.permissionDecision` response shape. Pure
 bash + jq.
